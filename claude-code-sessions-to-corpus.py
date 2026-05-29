@@ -42,7 +42,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -198,18 +198,45 @@ def render_markdown(session: dict, source_rel: str) -> tuple[str, str]:
     return short, "\n".join(body).rstrip() + "\n"
 
 
-def process(jsonl_path: Path, corpus_dir: Path, projects_root: Path, dry_run: bool) -> dict:
+def parse_date_flag(s: str) -> str:
+    """Accept YYYY-MM-DD or the special value 'yesterday'."""
+    if s == "yesterday":
+        return (date.today() - timedelta(days=1)).isoformat()
+    datetime.strptime(s, "%Y-%m-%d")  # validate format
+    return s
+
+
+def process(
+    jsonl_path: Path,
+    corpus_dir: Path,
+    projects_root: Path,
+    dry_run: bool,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
     sess = extract_session(jsonl_path)
     if sess is None:
         return {"status": "empty", "src": str(jsonl_path)}
     short, body = render_markdown(sess, str(jsonl_path.relative_to(projects_root)))
     date_str = session_date(sess["meta"], jsonl_path)
+
+    # Date filtering — applied after extraction so we use the session's own timestamp.
+    if date_from and date_str < date_from:
+        return {"status": "filtered", "src": str(jsonl_path), "date": date_str}
+    if date_to and date_str > date_to:
+        return {"status": "filtered", "src": str(jsonl_path), "date": date_str}
+
     out_path = corpus_dir / "claude-code-sessions" / date_str / f"{short}.md"
     result = {"status": "ok", "src": str(jsonl_path), "out": str(out_path),
               "date": date_str, "turns": len(sess["turns"]), "bytes": len(body)}
     if not dry_run:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if out_path.exists():
+            if date_from or date_to:
+                # Idempotent skip when date-filtering is active (nightly cron use).
+                return {"status": "skipped", "src": str(jsonl_path), "out": str(out_path),
+                        "date": date_str, "turns": len(sess["turns"])}
+            # No date filter: suffix with hash to preserve both (backfill / full-run use).
             digest = hashlib.sha256(str(jsonl_path).encode()).hexdigest()[:6]
             out_path = out_path.with_name(f"{short}-{digest}.md")
             result["out"] = str(out_path)
@@ -228,11 +255,28 @@ def main() -> int:
     ap.add_argument("--corpus-dir", type=Path, default=None,
                     help="Output corpus dir (default: GBRAIN_CORPUS_DIR or gbrain config)")
     ap.add_argument("--glob", default="*/*.jsonl", help="Glob under projects-root")
+    ap.add_argument("--date", metavar="YYYY-MM-DD",
+                    help="Only process sessions from this date ('yesterday' also accepted)")
+    ap.add_argument("--from", dest="date_from", metavar="YYYY-MM-DD",
+                    help="Only process sessions on or after this date")
+    ap.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD",
+                    help="Only process sessions on or before this date")
     ap.add_argument("--limit", type=int, default=0, help="Max sessions (0 = all)")
     ap.add_argument("--min-size", type=int, default=0, help="Skip JSONL files smaller than N bytes")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
+
+    # Resolve date range.
+    date_from = date_to = None
+    if args.date:
+        d = parse_date_flag(args.date)
+        date_from = date_to = d
+    else:
+        if args.date_from:
+            date_from = parse_date_flag(args.date_from)
+        if args.date_to:
+            date_to = parse_date_flag(args.date_to)
 
     corpus_dir = args.corpus_dir if args.corpus_dir else get_corpus_dir()
 
@@ -242,29 +286,40 @@ def main() -> int:
     if args.limit:
         paths = paths[: args.limit]
 
+    date_label = ""
+    if date_from and date_to and date_from == date_to:
+        date_label = f" [date={date_from}]"
+    elif date_from or date_to:
+        date_label = f" [from={date_from or '*'} to={date_to or '*'}]"
+
     print(f"Processing {len(paths)} Claude Code sessions → {corpus_dir}"
-          f"{' [DRY-RUN]' if args.dry_run else ''}", file=sys.stderr)
-    totals = {"ok": 0, "empty": 0, "err": 0, "bytes": 0, "turns": 0, "collisions": 0}
+          f"{date_label}{' [DRY-RUN]' if args.dry_run else ''}", file=sys.stderr)
+    totals: dict[str, int] = {"ok": 0, "empty": 0, "filtered": 0, "skipped": 0, "err": 0,
+                               "bytes": 0, "turns": 0, "collisions": 0}
     for p in paths:
         try:
-            r = process(p, corpus_dir, args.projects_root, args.dry_run)
-            totals[r["status"]] += 1
+            r = process(p, corpus_dir, args.projects_root, args.dry_run, date_from, date_to)
+            totals[r["status"]] = totals.get(r["status"], 0) + 1
             if r["status"] == "ok":
                 totals["bytes"] += r["bytes"]
                 totals["turns"] += r["turns"]
                 if r.get("collision_suffixed"):
                     totals["collisions"] += 1
                 if args.verbose:
-                    print(f"  ok  {r['date']} {r['turns']:3d} turns {r['bytes']:7d}B {r['out']}", file=sys.stderr)
+                    print(f"  ok      {r['date']} {r['turns']:3d} turns {r['bytes']:7d}B {r['out']}", file=sys.stderr)
             elif args.verbose:
-                print(f"  {r['status']:5s} {r['src']}", file=sys.stderr)
+                print(f"  {r['status']:8s} {r.get('date', '')} {r['src']}", file=sys.stderr)
         except Exception as e:
             totals["err"] += 1
             print(f"  ERR  {p}: {type(e).__name__}: {e}", file=sys.stderr)
 
-    print(f"\nDone. ok={totals['ok']} empty={totals['empty']} err={totals['err']} "
-          f"collisions={totals['collisions']} total_md_bytes={totals['bytes']} "
-          f"total_turns={totals['turns']}", file=sys.stderr)
+    print(
+        f"\nDone. ok={totals['ok']} skipped={totals['skipped']} filtered={totals['filtered']} "
+        f"empty={totals['empty']} err={totals['err']} "
+        f"collisions={totals['collisions']} total_md_bytes={totals['bytes']} "
+        f"total_turns={totals['turns']}",
+        file=sys.stderr,
+    )
     return 0 if totals["err"] == 0 else 1
 
 
