@@ -59,14 +59,17 @@ Skip if: pure routine ops, no decision or learning, content already indexed from
 
 ```bash
 YESTERDAY=$(date -d yesterday +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d)
-OPENAI_API_KEY=$(grep '^OPENAI_API_KEY=' ~/.hermes/.env | cut -d= -f2-)
-GBRAIN="OPENAI_API_KEY=$OPENAI_API_KEY GBRAIN_DISABLE_DIRECT_POOL=1 ~/.bun/bin/gbrain"
+CC_CONVERTER="$HOME/.hermes/skills/operations/gbrain-internos-setup/claude-code-sessions-to-corpus.py"
 
-# Step 1a — Hermes sessions
+# Step 1a — Hermes sessions (always runs)
 python3 ~/.hermes/scripts/sessions-to-corpus.py --date "$YESTERDAY"
 
-# Step 1b — Claude Code sessions
-python3 /path/to/claude-code-sessions-to-corpus.py --date "$YESTERDAY" --min-size 2000
+# Step 1b — Claude Code sessions (best-effort; skip + flag if converter not installed)
+if [ -f "$CC_CONVERTER" ]; then
+  python3 "$CC_CONVERTER" --date "$YESTERDAY" --min-size 2000
+else
+  CC_SESSIONS_SKIPPED=true  # surfaced in Slack report — see below
+fi
 
 # Step 2–3 — Synthesis (agent reads corpus files and writes pages inline)
 # See synthesis criteria above. Write pages to /tmp/gbrain-synth/<slug>.md
@@ -110,6 +113,13 @@ gbrain dream — YYYY-MM-DD
 
 Pages added: N  (brain total: T)
 Topics: [one-line summary of what was synthesized, or "nothing notable"]
+```
+
+If the CC sessions converter was not found, append:
+
+```
+⚠️ CC sessions skipped — converter not installed.
+Update: cd ~/.hermes/skills/operations/gbrain-internos-setup && git pull origin main
 ```
 
 If nothing was written and nothing was imported: stay silent (no post needed).
