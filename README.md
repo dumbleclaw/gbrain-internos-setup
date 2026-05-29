@@ -15,6 +15,7 @@ Covers two permanent workarounds for [gbrain](https://github.com/garrytan/gbrain
 | `sessions-to-corpus.py` | Converts **Hermes** JSONL session files to dated corpus markdown for gbrain |
 | `claude-code-sessions-to-corpus.py` | Converts **Claude Code** JSONL sessions (`~/.claude/projects/`) — different schema; also scrubs secrets |
 | `gbrain-prejudge.ts` | Pre-populates `dream_verdicts` table in Supabase to bypass significance judge (Bun) |
+| `gbrain-daily-dream/SKILL.md` | Nightly cron skill — converts yesterday's sessions, synthesizes inline, imports, reports to Slack |
 
 ## Quick start
 
