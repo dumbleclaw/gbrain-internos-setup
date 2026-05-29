@@ -320,12 +320,63 @@ OPENAI_API_KEY=... GBRAIN_DISABLE_DIRECT_POOL=1 ~/.bun/bin/gbrain dream --phase 
 
 ---
 
+## Workspaces Import
+
+Index an entire internOS workspace directory directly into gbrain — no synthesis step required for curated structured markdown.
+
+### Two-track approach
+
+| Track | When to use | Method |
+|-------|-------------|--------|
+| **Direct import** | Already-curated structured markdown (BRIEF, STATUS, DECISIONS, MEMORY, RESOURCES, docs/) | `gbrain import <dir> --exclude "**/code/**"` |
+| **Synthesize first** | Raw/unstructured content: transcripts, journals, design docs >30KB | Parallel haiku Agent → `/tmp/gbrain-synth/` → `gbrain import` |
+
+**Key distinction from session import:** sessions are raw transcripts where synthesis extracts signal. Workspace files are already distilled — direct import indexes exactly what was written and is almost always correct.
+
+### Exclusions
+
+Always exclude `code/` directories — they contain implementation repos that belong to their own git remotes, not the knowledge brain:
+
+```bash
+OPENAI_API_KEY=$(grep '^OPENAI_API_KEY=' ~/.hermes/.env | cut -d= -f2-) \
+GBRAIN_DISABLE_DIRECT_POOL=1 \
+~/.bun/bin/gbrain import ~/.hermes/workspaces/agencia/projects/<project>/ \
+  --exclude "**/code/**"
+```
+
+### Batch ordering
+
+Run projects smallest → largest (by total markdown bytes). This validates the pipeline cheaply before committing to large batches. Gate each with a `gbrain search` before advancing.
+
+### Identifying oversized files
+
+After direct import, gbrain flags files that exceed its size threshold with a content-sanity warning in the import output. Those files are indexed but produce coarser chunks. Run a synthesis pass on them to create a distilled brain page alongside the raw indexed content:
+
+```bash
+# Find files >30KB outside code/ dirs
+find ~/.hermes/workspaces -name "*.md" ! -path "*/code/*" | \
+  xargs wc -c | awk '$1 > 30000' | sort -rn
+```
+
+Spawn one haiku Agent per oversized file (see parallel synthesis pattern above) and import the synthesized pages. The raw page and the synthesis page coexist — the synthesis page ranks higher on semantic queries; the raw page remains as a detailed reference.
+
+### Parallel subagents for multi-project batches
+
+For multiple projects in one session, spawn one agent per project in a single message — each runs `gbrain import` independently. Already-indexed pages are skipped (content-hash check), so concurrent imports across different project dirs are safe.
+
+### Namespace safety
+
+Always import from the **corpus parent directory**, not a subdirectory. `gbrain import <subdir>` roots slugs at `<subdir>`, stripping any parent path from slug prefixes — causing namespace collisions. See also: Gotcha 2 in the Gotchas section above.
+
+---
+
 ## Helper Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `~/.hermes/scripts/sessions-to-corpus.py` | Convert Hermes JSONL sessions → dated corpus markdown |
-| `~/.hermes/scripts/gbrain-prejudge.ts` | Pre-populate `dream_verdicts` table to bypass significance judge |
+| `sessions-to-corpus.py` | Convert Hermes JSONL sessions → dated corpus markdown |
+| `claude-code-sessions-to-corpus.py` | Convert Claude Code JSONL sessions → corpus markdown (different schema; scrubs secrets) |
+| `gbrain-prejudge.ts` | Pre-populate `dream_verdicts` table to bypass significance judge (Bun) |
 
 ---
 
